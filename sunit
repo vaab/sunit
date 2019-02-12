@@ -892,15 +892,20 @@ for test_file in "${pos_args[@]}"; do
     #     echo "  (reminder: sunit test files should not be executable)"
     #     continue
     # fi
-    test_counter=0
-    declare -g test_tmpdir=$(mktemp -d)
-    export test_tmpdir
-    __sunit_todo="rm -rvf \"$test_tmpdir\""  ## saving the original name
 
-    source "./${test_file}"
+    ## Protect each test to temper environment of next tests
+    (
+        test_counter=0
+        declare -g test_tmpdir=$(mktemp -d)
+        export test_tmpdir
+        __sunit_todo="rm -rvf \"$test_tmpdir\""  ## saving the original name
 
-    unset teardown setup
-    $__sunit_todo
+        source "./${test_file}"
+
+        unset teardown setup
+        $__sunit_todo
+        try ''                        ## close last test
+    )
 done
 
 summary
