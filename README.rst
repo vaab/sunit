@@ -89,12 +89,15 @@ TBD
 Syntax token
 ------------
 
-TBD
+
+    try CODE [MESSAGE]
+    is {errlvl,err,out} [COMPARISON_METHOD] VALUE [OUTCOME_MODIFIERS...]
+
 
 Contributing
 ============
 
-Any suggestion or issue is welcome. Push request are very welcome,
+Any suggestions or issues are welcome. Push requests are very welcome,
 please check out the guidelines.
 
 
@@ -120,7 +123,7 @@ it'll take less time if you follow the following guidelines:
 
 If you have some questions about guidelines which is not answered here,
 please check the current ``git log``, you might find previous commit that
-would show you how to deal with your issue.
+shows you how to deal with your issue.
 
 
 License

@@ -23,7 +23,7 @@
 
 [[ "${BASH_SOURCE[0]}" != "${0}" ]] && SOURCED=true
 
-exname="$(basename $0)"
+exname="${0##*/}"
 
 
 PROFILE_STORE_DIR=${PROFILE_STORE_DIR:-~/.$exname/profiles}
@@ -217,16 +217,6 @@ array.exists() {
 }
 
 
-array.keys_to_stdin() {
-    local e
-    if [ "$#" -ne "1" ]; then
-        echo "${RED}SyntaxError:$NORMAL" "${WHITE}$FUNCNAME${NORMAL}: need one argument." >&2
-        return 1
-    fi
-    var="$1"
-    eval "for e in \"\${!$var[@]}\"; do echo -en \"\$e\\0\"; done"
-}
-
 read-0() {
     local eof= IFS=''
     while [ "$1" ]; do
@@ -236,20 +226,24 @@ read-0() {
     test "$eof" != true
 }
 
-# check if value is in array
-array.member() {
-    local src="$1" elt="$2"
-    while read-0 key; do
-        if [ "$(eval "echo -n \"\${$src[\$key]}\"")" == "$elt" ]; then
-            return 0
-        fi
-    done < <(array.keys_to_stdin "$src")
-    return 1
+read-0a() {
+    local eof= IFS=''
+    while [ "$1" ]; do
+        IFS='' read -r -d $'\n' -- "$1" || eof=1
+        shift
+    done
+    [ -z "$eof" ]
 }
 
 
 ## shortcut to timenote
-time_note() { calc 1 "l($1 - $empty_try_time) / l(10) - 3"; }
+time_note() {
+    if [ "$1" == "0" ]; then
+        echo "0"
+    else
+        calc 1 "l($1 - $empty_try_time) / l(10) - 3"
+    fi
+}
 
 
 ## Profile mangling (mostly dict)
@@ -261,7 +255,7 @@ profile.load() {
         err "No file '$filename' found."
         return 1
     }
-    while IFS=':' read label value; do
+    while IFS=':' read -r label value; do
         label=${label%% *}
         [ "$label" ] || continue
         [ "$label" != "Command" ] || continue
@@ -538,16 +532,21 @@ should_we_repeat() {
 
 first_non_zero=
 swallow_last_time() {
-    total=${total:-0}
+    local total sum_time
+    if [ -e "$tmp_totals" ]; then
+        read -r total sum_time empty_try_time_sum empty_try_time_count empty_try_time < <(cat "$tmp_totals")
+    else
+        total=0
+        sum_time=0
+    fi
     ((total+=nb_assert))
-    sum_time=${sum_time:-0}
     [ -e "$tmp_profile" ] || return 0
     profile.load __profile "$tmp_profile" || exit 1
     if [ "$sum_time" == "0" -a -z "$cmd" ]; then  ## catches first empty 'try'
         profile.increment __base_profile __profile
 	    empty_try_time_sum="$(echo "scale=0 ; $empty_try_time_sum + $time_diff" | bc -l)"
         ((empty_try_time_count++))
-	    empty_try_time="$(echo "scale=2 ; $empty_try_time_sum / $empty_try_time_count" | bc -l)"
+        empty_try_time="$(echo "scale=2 ; $empty_try_time_sum / $empty_try_time_count" | bc -l)"
 	    return 0
     else
         if [ -z "$first_non_zero" ]; then
@@ -562,6 +561,9 @@ swallow_last_time() {
     fi
     nb_assert_string=$(printf "%4s asserts" "$nb_assert")
     nb_assert=0
+    [ "$test_name" ] || {
+        return 0
+    }
 
     profile.decrement __profile __base_profile
     if [ "$PROFILE" ]; then
@@ -601,7 +603,7 @@ swallow_last_time() {
             profile.load __ref_profile "$PROFILE_STORE_DIR/$DIFF/$test_name" || exit 1
             profile.decrement __ref_profile __profile
             value=
-            while IFS=: read label value; do
+            while IFS=: read -r label value; do
                 value="$(calc 0 "- $value")"  ## invert the diff
                 if [ "${value::1}" == "-" ]; then
                     printf "  ${DARKGREEN}- %-15s %4s$NORMAL (%s)\n" "$label" "${value:1}" "${__profile[$label]}"
@@ -616,6 +618,7 @@ swallow_last_time() {
         value="$(calc 3 "${__profile[time.real]} / 1000000")"
         line_s "$test_name $test_desc" "$nb_assert_string" "$value"
     fi
+    printf "%s " "$total" "$sum_time" "$empty_try_time_sum" "$empty_try_time_count" "$empty_try_time" > "$tmp_totals"
 }
 
 
@@ -744,7 +747,7 @@ time_exec() {
     exec 3>&1 4>&2
     out=$(TIMEFORMAT="%R %U %S"; { time timing bash -c "$*" 1>&3 2>&4; } 2>&1)
     errlvl=$?
-    read r u s <<<$(echo "$out" | tr -d ".")
+    read -r r u s <<<$(echo "$out" | tr -d ".")
     for x in r u s; do
         [ "${!x}" == "0000" ] && eval "$x=1"
         eval "$x+=000"
@@ -772,14 +775,14 @@ ACTION_errlvl() { cat "$tmp_errlvl"; }
 
 linereg() {
     local reg="$1" line
-    while read line; do
+    while read-0a line; do
         [[ "$line" =~ $reg ]] && return 0
     done
     return 1
 }
 
 is() {
-    local is_command errlvl
+    local is_command errlvl err out
     if [ "$deactivate" == "true" ]; then
         return 0
     fi
@@ -816,7 +819,7 @@ is() {
 	    "")      [ "$code" == "$output" ];;
         "part")  [[ "$output" == *"$code"* ]];;
 	    "reg")   [[ "$output" =~ $code ]];;
-	    "linereg") echo "$output" | linereg "$code";;
+	    "linereg") printf "%s\n" "$output" | linereg "$code";;
 	    # "reg")   echo -n "$output" | grep -P -- "$code" >/dev/null 2>&1;;
     esac && {
         ((++nb_assert))
@@ -830,21 +833,39 @@ is() {
     echo "${BG_BLACK}$code${BG_DEFAULT}$GRAY\$$NORMAL" | sed -r "s/^/  $GRAY|$NORMAL $BG_BLACK/g;s/$/$BG_DEFAULT/g";
     echo "real ${WHITE}$act$NORMAL $YELLOW$*$NORMAL"
     echo "${BG_BLACK}$(echo "$output" | ${output_mod})${BG_DEFAULT}$GRAY\$$NORMAL" | sed -r "s/^/  $GRAY|$NORMAL $BG_BLACK/g;s/$/$BG_DEFAULT/g";
-    echo "${WHITE}Diff$NORMAL expected real"
-    diff -u <(echo "$code" | cat -t) <(echo "$output" | cat -t) | egrep -v '^(---|\+\+\+) /' \
-        | sed -r "s/^(\@@.*)*$/$DARKCYAN\1$NORMAL/g;\
+
+    if [[ "$act" ==  "errlvl" ]]; then
+        err=$("ACTION_err"; echo -n 'x')
+        err=${err::-1}
+        echo "${WHITE}stderr$NORMAL:"
+        printf "%s" "$err" | sed -r "s/^/  ${DARKRED}!${NORMAL} /g"
+        echo "${WHITE}stdout$NORMAL:"
+        out=$("ACTION_out"; echo -n 'x')
+        out=${out::-1}
+        printf "%s" "$out" | sed -r "s/^/  ${DARKGRAY}|${NORMAL} /g"
+    else
+        echo "${WHITE}Diff$NORMAL expected real"
+        diff -u <(echo "$code" | cat -t) <(echo "$output" | cat -t) | egrep -v '^(---|\+\+\+) /' \
+            | sed -r "s/^(\@@.*)*$/$DARKCYAN\1$NORMAL/g;\
                   s/^\-(.*)*$/$RED-$NORMAL $DARKRED\1$NORMAL/g;
                   s/^\+(.*)*$/$GREEN+$NORMAL $DARKGREEN\1$NORMAL/g;
                   s/^ /$GRAY|$NORMAL /g;
                   s/^/  /g"
+    fi
     exit 1
 }
 
 summary() {
-    swallow_last_time
-    echo "$YELLOW$total$NORMAL assertions ${DARKGREEN}passed$NORMAL." \
-         "Code took $DARKYELLOW$(echo "scale=3;$sum_time/1000000" | bc)$NORMAL s" \
-         "($DARKCYAN$(time_note $sum_time)$NORMAL dB)."
+    local total sum_time empty_try_time_sum empty_try_time_count empty_try_time
+    if [ -e "$tmp_totals" ]; then
+        read -r total sum_time empty_try_time_sum empty_try_time_count empty_try_time < <(cat "$tmp_totals")
+    else
+        total=0
+        sum_time=0
+    fi
+    echo "$YELLOW${total:-0}$NORMAL assertions ${DARKGREEN}passed$NORMAL." \
+         "Code took $DARKYELLOW$(echo "scale=3;${sum_time:-0}/1000000" | bc)$NORMAL s" \
+         "($DARKCYAN$(time_note "${sum_time:-0}")$NORMAL dB)."
 }
 
 noerror() {
@@ -863,6 +884,7 @@ tmp_out="$libtest_tmpdir/stdout"
 tmp_err="$libtest_tmpdir/stderr"
 tmp_errlvl="$libtest_tmpdir/errlvl"
 tmp_profile="$libtest_tmpdir/profile"
+tmp_totals="$libtest_tmpdir/totals"
 
 
 ## keeps those empty 'try': they are are ways to estimate the
@@ -875,24 +897,37 @@ fi
 
 ## Launching ``sunit`` without args in wrong directory would then load
 ## and execute a lots of strange things.
-#if [ -z "${pos_args[*]}" ]; then
-#    pos_args=(*)
-#fi
+if [ -z "${pos_args[*]}" ]; then
+   pos_args=(*)
+fi
 
-for test_file in "${pos_args[@]}"; do
-    [ "${test_file}" == "*" ] && continue
-    array.member exclude_tests "$test_file" && continue
+skipped=()
+done=()
+while [ "${#pos_args[@]}" -gt 0 ]; do
+    test_file="${pos_args[0]}"
+    pos_args=("${pos_args[@]:1}")
+    [[ "${test_file}" == *"*" ]] && continue
+    canon_test_file=$(readlink -f "$test_file") || {
+        err "Could not canonicalize path of '$test_file'."
+        exit 1
+    }
+    [[ " ${done[@]} " == *" ${canon_test_file} "* ]] && continue
+    [[ " ${exclude_tests[@]} " == *" $test_file "* ]] && continue
+    [ -d "${test_file}" ] && {
+        pos_args+=("${test_file}/"*)
+        continue
+    }
 
     if ! [ -e "${test_file}" ]; then
         echo "${RED}Error$NORMAL: No test file named '${test_file}'." >&2
         exit 1
     fi
-    # if [ -x "${test_file}" ]; then
-    #     echo "${DARKYELLOW}Warn$NORMAL: skipping executable '${test_file}'."
-    #     echo "  (reminder: sunit test files should not be executable)"
-    #     continue
-    # fi
+    if [ -x "${test_file}" ]; then
+        skipped+=("${test_file}")
+        continue
+    fi
 
+    echo "${WHITE}$test_file${NORMAL}:"
     ## Protect each test to temper environment of next tests
     (
         test_counter=0
@@ -904,8 +939,12 @@ for test_file in "${pos_args[@]}"; do
 
         unset teardown setup
         $__sunit_todo
-        try ''                        ## close last test
-    )
+        swallow_last_time
+    ) || exit 1
 done
 
 summary
+if [ "${#skipped[@]}" -gt 0 ]; then
+    echo "${DARKYELLOW}Warn$NORMAL: skipped executables: ${skipped[@]}" >&2
+    echo "  (reminder: sunit test files should not be executable)" >&2
+fi
